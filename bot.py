@@ -4,7 +4,7 @@ import time
 import html
 from flask import Flask, send_from_directory, abort
 from threading import Thread
-from telegram import Update, ParseMode
+from telegram import Update, ParseMode, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
 
 # --- Config ---
@@ -29,24 +29,21 @@ logger = logging.getLogger(__name__)
 
 file_count = 0
 
-# --- Flask Web App (for file downloads) ---
+# --- Flask Web App ---
 app = Flask(__name__)
 
 @app.route("/files/<path:filename>")
 def download_file(filename):
-    """Serve files from storage"""
     filepath = os.path.join(FILES_DIR, filename)
     if not os.path.exists(filepath):
         abort(404, description="File not found")
     return send_from_directory(FILES_DIR, filename, as_attachment=True)
 
 def run_flask():
-    """Run Flask server on port 8080 (Koyeb requirement)"""
     app.run(host="0.0.0.0", port=8080)
 
 # --- Helpers ---
 def save_user(user_id: int):
-    """Save user ID if new"""
     try:
         users = set()
         try:
@@ -60,69 +57,90 @@ def save_user(user_id: int):
     except Exception as e:
         logger.error(f"Error saving user {user_id}: {e}")
 
-def save_user_file(user_id: int, file_id: str, filename: str):
-    """Log file uploaded by a user"""
+def save_user_file(user_id: int, file_id: str, filename: str, tg_file_id: str, file_type: str, file_size: int):
     try:
         with open(USER_FILES, "a") as f:
-            f.write(f"{user_id}|{file_id}|{filename}\n")
+            f.write(f"{user_id}|{file_id}|{filename}|{tg_file_id}|{file_type}|{file_size}\n")
     except Exception as e:
         logger.error(f"Error saving user file: {e}")
 
 def find_file_by_id(file_id: str):
-    """Find filename mapped to file_id"""
     try:
         with open(USER_FILES, "r") as f:
             for line in f:
                 parts = line.strip().split("|")
-                if len(parts) == 3 and parts[1] == file_id:
-                    return parts[2]  # filename
+                if len(parts) >= 6 and parts[1] == file_id:
+                    return {
+                        "filename": parts[2],
+                        "tg_file_id": parts[3],
+                        "file_type": parts[4],
+                        "file_size": parts[5]
+                    }
     except FileNotFoundError:
         return None
     return None
 
 def get_user_files(user_id: int, limit: int = 10):
-    """Get last N files uploaded by user"""
     files = []
     try:
         with open(USER_FILES, "r") as f:
             for line in f:
                 parts = line.strip().split("|")
-                if len(parts) == 3 and parts[0] == str(user_id):
-                    files.append((parts[1], parts[2]))
+                if len(parts) >= 6 and parts[0] == str(user_id):
+                    files.append((parts[1], parts[2], parts[4], parts[5]))
     except FileNotFoundError:
         return []
     return files[-limit:]
 
 def generate_file_id(user_id: int, message_id: int) -> str:
-    """Unique file ID = timestamp + user + message"""
     timestamp = int(time.time())
     return f"{timestamp}_{user_id}_{message_id}"
 
 def get_download_domain() -> str:
-    """Domain for direct links (custom or default Koyeb)"""
     return os.getenv("CUSTOM_DOMAIN", f"{os.getenv('KOYEB_APP_NAME', 'your-app')}.koyeb.app")
 
-# --- Telegram Handlers ---
-def start(update: Update, context: CallbackContext):
-    """Handle /start and deep links"""
-    if context.args:  # Deep link mode
-        file_id = context.args[0]
-        filename = find_file_by_id(file_id)
-        if filename:
-            direct_link = f"https://{get_download_domain()}/files/{filename}"
-            update.message.reply_text(
-                f"📂 <b>File Found!</b>\n\n"
-                f"🆔 <b>File ID:</b> <code>{file_id}</code>\n"
-                f"📝 <b>Name:</b> <code>{html.escape(filename)}</code>\n\n"
-                f"🔗 <b>Direct Download:</b>\n<a href='{direct_link}'>{direct_link}</a>",
-                parse_mode=ParseMode.HTML,
-                disable_web_page_preview=True
-            )
-        else:
-            update.message.reply_text("❌ File not found. Maybe it was deleted.", parse_mode=ParseMode.HTML)
+# --- File Sending ---
+def send_file(update: Update, context: CallbackContext, file_id: str):
+    data = find_file_by_id(file_id)
+    if not data:
+        update.message.reply_text("❌ File not found. Please check the ID.", parse_mode=ParseMode.HTML)
         return
 
-    # Normal /start
+    tg_file_id = data["tg_file_id"]
+    filename = data["filename"]
+    file_type = data["file_type"]
+    file_size = data["file_size"]
+    direct_link = f"https://{get_download_domain()}/files/{filename}"
+
+    caption = (
+        f"📂 <b>File Retrieved!</b>\n\n"
+        f"📝 <b>Name:</b> <code>{html.escape(filename)}</code>\n"
+        f"📁 <b>Type:</b> {file_type}\n"
+        f"📦 <b>Size:</b> {file_size} KB\n"
+        f"🆔 <b>File ID:</b> <code>{file_id}</code>"
+    )
+
+    buttons = [[InlineKeyboardButton("📥 Direct Download", url=direct_link)]]
+    reply_markup = InlineKeyboardMarkup(buttons)
+
+    try:
+        update.message.reply_document(
+            document=tg_file_id,
+            caption=caption,
+            parse_mode=ParseMode.HTML,
+            reply_markup=reply_markup
+        )
+    except Exception as e:
+        logger.error(f"Send file error: {e}")
+        update.message.reply_text("❌ Could not send file. Maybe it's too large?", parse_mode=ParseMode.HTML)
+
+# --- Handlers ---
+def start(update: Update, context: CallbackContext):
+    if context.args:  # Deep link mode
+        file_id = context.args[0]
+        send_file(update, context, file_id)
+        return
+
     update.message.reply_text(
         "👋 <b>Welcome to Report Cloud Storage!</b>\n\n"
         "📤 Send me any file and I’ll save it with a <b>Deep Link</b> and <b>Direct Download</b>.\n\n"
@@ -133,7 +151,6 @@ def start(update: Update, context: CallbackContext):
     )
 
 def handle_file(update: Update, context: CallbackContext):
-    """Save uploaded files and return links"""
     global file_count
     message = update.message
     user_id = message.from_user.id
@@ -142,10 +159,11 @@ def handle_file(update: Update, context: CallbackContext):
     file_type, file_id, ext, file_size = "File", None, "bin", 0
 
     try:
-        if message.document:
+        if message.document:  # Covers ALL file types (.mkv, .zip, .apk, .exe, etc.)
             file_type = "Document"
             file_id = message.document.file_id
-            ext = message.document.file_name.split(".")[-1] if "." in message.document.file_name else "bin"
+            filename_original = message.document.file_name or "file.bin"
+            ext = filename_original.split(".")[-1] if "." in filename_original else "bin"
             file_size = message.document.file_size
         elif message.photo:
             file_type, file_id, ext = "Photo", message.photo[-1].file_id, "jpg"
@@ -165,38 +183,43 @@ def handle_file(update: Update, context: CallbackContext):
             message.reply_text("❌ Unsupported file type.")
             return
 
-        # Forward to storage group
         forwarded = message.forward(chat_id=GROUP_CHAT_ID)
         file_unique_id = generate_file_id(user_id, forwarded.message_id)
 
-        # Filename = File ID + extension
         filename = f"{file_unique_id}.{ext}"
         local_path = os.path.join(FILES_DIR, filename)
 
-        # Download file
         file = context.bot.get_file(file_id)
         file.download(local_path)
 
         file_count += 1
-        save_user_file(user_id, file_unique_id, filename)
+        save_user_file(
+            user_id, file_unique_id, filename, file_id,
+            file_type, round(file_size / 1024) if file_size else "?"
+        )
 
-        logger.info(f"Saved file: {filename}")
-        size_kb = round(file_size / 1024) if file_size else "?"
-
-        # Links
         direct_link = f"https://{get_download_domain()}/files/{filename}"
         deep_link = f"https://t.me/{context.bot.username}?start={file_unique_id}"
 
-        message.reply_text(
+        caption = (
             f"✅ <b>File Saved!</b>\n\n"
             f"📝 <b>Name:</b> <code>{html.escape(filename)}</code>\n"
             f"📁 <b>Type:</b> {file_type}\n"
-            f"📦 <b>Size:</b> {size_kb} KB\n"
-            f"🆔 <b>File ID:</b> <code>{file_unique_id}</code>\n\n"
-            f"🔗 <b>Deep Link:</b>\n<a href='{deep_link}'>{deep_link}</a>\n\n"
-            f"🔗 <b>Direct Download:</b>\n<a href='{direct_link}'>{direct_link}</a>",
+            f"📦 <b>Size:</b> {round(file_size / 1024) if file_size else '?'} KB\n"
+            f"🆔 <b>File ID:</b> <code>{file_unique_id}</code>"
+        )
+
+        buttons = [
+            [InlineKeyboardButton("🔗 Deep Link", url=deep_link)],
+            [InlineKeyboardButton("📥 Direct Download", url=direct_link)]
+        ]
+        reply_markup = InlineKeyboardMarkup(buttons)
+
+        message.reply_document(
+            document=file_id,
+            caption=caption,
             parse_mode=ParseMode.HTML,
-            disable_web_page_preview=True
+            reply_markup=reply_markup
         )
 
     except Exception as e:
@@ -204,28 +227,12 @@ def handle_file(update: Update, context: CallbackContext):
         message.reply_text("❌ Failed to save your file. Please try again.")
 
 def get_file(update: Update, context: CallbackContext):
-    """Retrieve file by ID manually"""
     if not context.args:
         update.message.reply_text("❌ Usage: <code>/get &lt;file_id&gt;</code>", parse_mode=ParseMode.HTML)
         return
-
-    file_id = context.args[0]
-    filename = find_file_by_id(file_id)
-    if filename:
-        direct_link = f"https://{get_download_domain()}/files/{filename}"
-        update.message.reply_text(
-            f"📂 <b>File Found!</b>\n\n"
-            f"🆔 <b>File ID:</b> <code>{file_id}</code>\n"
-            f"📝 <b>Name:</b> <code>{html.escape(filename)}</code>\n\n"
-            f"🔗 <b>Direct Download:</b>\n<a href='{direct_link}'>{direct_link}</a>",
-            parse_mode=ParseMode.HTML,
-            disable_web_page_preview=True
-        )
-    else:
-        update.message.reply_text("❌ File not found. Please check the ID.", parse_mode=ParseMode.HTML)
+    send_file(update, context, context.args[0])
 
 def myfiles(update: Update, context: CallbackContext):
-    """List last 10 files of a user"""
     user_id = update.message.from_user.id
     files = get_user_files(user_id, limit=10)
 
@@ -234,24 +241,36 @@ def myfiles(update: Update, context: CallbackContext):
         return
 
     text = "📂 <b>Your Recent Files</b>\n\n"
-    for fid, fname in files:
+    for fid, fname, ftype, fsize in files:
         direct_link = f"https://{get_download_domain()}/files/{fname}"
-        text += f"🆔 <code>{fid}</code>\n<a href='{direct_link}'>Download</a>\n\n"
+        text += (
+            f"📝 <b>Name:</b> <code>{html.escape(fname)}</code>\n"
+            f"📁 <b>Type:</b> {ftype}\n"
+            f"📦 <b>Size:</b> {fsize} KB\n"
+            f"🆔 <code>{fid}</code>\n"
+            f"<a href='{direct_link}'>📥 Download</a>\n\n"
+        )
 
     update.message.reply_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
 def stats(update: Update, context: CallbackContext):
-    """Show usage statistics"""
     try:
         with open(USERS_FILE, "r") as f:
             users = len(f.readlines())
     except FileNotFoundError:
         users = 0
 
+    try:
+        with open(USER_FILES, "r") as f:
+            total_files = len(f.readlines())
+    except FileNotFoundError:
+        total_files = 0
+
     update.message.reply_text(
         f"📊 <b>Stats</b>\n\n"
         f"👤 <b>Users:</b> {users}\n"
-        f"📦 <b>Files this session:</b> {file_count}",
+        f"📦 <b>Files uploaded:</b> {total_files}\n"
+        f"📥 <b>Files this session:</b> {file_count}",
         parse_mode=ParseMode.HTML
     )
 
@@ -270,9 +289,7 @@ def main():
     dp.add_handler(MessageHandler(Filters.all & ~Filters.command, handle_file))
     dp.add_handler(MessageHandler(Filters.command, unknown))
 
-    # Run Flask in thread
     Thread(target=run_flask).start()
-
     logger.info("🤖 Bot started")
     updater.start_polling()
     updater.idle()
