@@ -2,7 +2,7 @@ import os
 import logging
 import time
 import html
-from telegram import Update, ParseMode, Message, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, ParseMode, Message
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
 
 # --- Config ---
@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 file_count = 0
 
-# --- Helpers ---
+# --- Helper Functions ---
 def generate_file_id(user_id: int, message_id: int) -> str:
     return f"{int(time.time())}_{user_id}_{message_id}"
 
@@ -41,8 +41,9 @@ def save_user(user_id: int) -> None:
         logger.error(f"Error saving user {user_id}: {e}")
 
 def format_file_size(size: int) -> str:
+    """Convert bytes into human-readable format."""
     if not size:
-        return "?"
+        return "Unknown"
     for unit in ["B", "KB", "MB", "GB", "TB"]:
         if size < 1024:
             return f"{round(size, 2)} {unit}"
@@ -111,7 +112,6 @@ def start(update: Update, context: CallbackContext) -> None:
     user_id = update.message.from_user.id
     save_user(user_id)
 
-    # Deep link handling
     args = context.args
     if args and len(args) == 1:
         try:
@@ -130,12 +130,12 @@ def start(update: Update, context: CallbackContext) -> None:
 
     update.message.reply_text(
         "*👋 Welcome to Report Cloud Storage!*\n\n"
-        "📁 Upload any file to get a unique *File ID*.\n"
-        "🔗 Retrieve files using the ID or deep link.\n\n"
+        "📁 Upload any file and receive a unique *File ID*.\n"
+        "🔗 Retrieve files anytime using the File ID or deep link.\n\n"
         "*Commands:*\n"
         "• /help – How to use\n"
         "• /stats – Session Stats\n"
-        "• /announce – (Admin only) Broadcast a message",
+        "• /announce – (Admin only) Broadcast message",
         parse_mode=ParseMode.MARKDOWN
     )
 
@@ -143,7 +143,7 @@ def help_command(update: Update, context: CallbackContext) -> None:
     update.message.reply_text(
         "*📖 How to Use:*\n\n"
         "1️⃣ Send any file (document, photo, video, etc).\n"
-        "2️⃣ Receive a *File ID* and clickable *Deep Link*.\n"
+        "2️⃣ Receive a *File ID* and copyable *Deep Link*.\n"
         f"3️⃣ Retrieve your file: `https://t.me/{context.bot.username}?start=<FileID>`\n\n"
         "4️⃣ Broadcast message (Admin only):\n"
         " • Reply to a message and type /announce",
@@ -210,19 +210,16 @@ def handle_file(update: Update, context: CallbackContext) -> None:
 
             file_type, file_name, file_size = detect_file_type(message)
             size_readable = format_file_size(file_size)
-
-            keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("📂 Retrieve File", url=f"https://t.me/{context.bot.username}?start={file_id}")]
-            ])
+            deep_link = f"https://t.me/{context.bot.username}?start={file_id}"
 
             update.message.reply_text(
                 f"✅ *File Saved!*\n\n"
                 f"📝 *Name:* `{html.escape(file_name)}`\n"
                 f"📁 *Type:* {file_type}\n"
                 f"📦 *Size:* {size_readable}\n"
-                f"🆔 *File ID:* `{file_id}`",
+                f"🆔 *File ID:* `{file_id}`\n"
+                f"🔗 *Deep Link:*\n`{deep_link}`",
                 parse_mode=ParseMode.MARKDOWN,
-                reply_markup=keyboard,
                 disable_web_page_preview=True
             )
         except Exception as e:
