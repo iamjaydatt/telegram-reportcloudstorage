@@ -16,7 +16,7 @@ USER_FILES = "user_files.txt"
 FILES_DIR = "files"
 
 if not BOT_TOKEN:
-    raise ValueError("❌ BOT_TOKEN is not set. Please configure environment variables in Koyeb.")
+    raise ValueError("❌ BOT_TOKEN is not set. Please configure env vars in Koyeb.")
 
 os.makedirs(FILES_DIR, exist_ok=True)
 
@@ -45,7 +45,7 @@ def run_flask():
     app.run(host="0.0.0.0", port=8080)
 
 # --- Helpers ---
-def save_user(user_id: int) -> None:
+def save_user(user_id: int):
     """Save user ID if new"""
     try:
         users = set()
@@ -67,6 +67,18 @@ def save_user_file(user_id: int, file_id: str, filename: str):
             f.write(f"{user_id}|{file_id}|{filename}\n")
     except Exception as e:
         logger.error(f"Error saving user file: {e}")
+
+def find_file_by_id(file_id: str):
+    """Find filename mapped to file_id"""
+    try:
+        with open(USER_FILES, "r") as f:
+            for line in f:
+                parts = line.strip().split("|")
+                if len(parts) == 3 and parts[1] == file_id:
+                    return parts[2]  # filename
+    except FileNotFoundError:
+        return None
+    return None
 
 def get_user_files(user_id: int, limit: int = 10):
     """Get last N files uploaded by user"""
@@ -92,6 +104,25 @@ def get_download_domain() -> str:
 
 # --- Telegram Handlers ---
 def start(update: Update, context: CallbackContext):
+    """Handle /start and deep links"""
+    if context.args:  # Deep link mode
+        file_id = context.args[0]
+        filename = find_file_by_id(file_id)
+        if filename:
+            direct_link = f"https://{get_download_domain()}/files/{filename}"
+            update.message.reply_text(
+                f"📂 <b>File Found!</b>\n\n"
+                f"🆔 <b>File ID:</b> <code>{file_id}</code>\n"
+                f"📝 <b>Name:</b> <code>{html.escape(filename)}</code>\n\n"
+                f"🔗 <b>Direct Download:</b>\n<a href='{direct_link}'>{direct_link}</a>",
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True
+            )
+        else:
+            update.message.reply_text("❌ File not found. Maybe it was deleted.", parse_mode=ParseMode.HTML)
+        return
+
+    # Normal /start
     update.message.reply_text(
         "👋 <b>Welcome to Report Cloud Storage!</b>\n\n"
         "📤 Send me any file and I’ll save it with a <b>Deep Link</b> and <b>Direct Download</b>.\n\n"
@@ -173,24 +204,25 @@ def handle_file(update: Update, context: CallbackContext):
         message.reply_text("❌ Failed to save your file. Please try again.")
 
 def get_file(update: Update, context: CallbackContext):
-    """Retrieve file by ID"""
+    """Retrieve file by ID manually"""
     if not context.args:
         update.message.reply_text("❌ Usage: <code>/get &lt;file_id&gt;</code>", parse_mode=ParseMode.HTML)
         return
 
     file_id = context.args[0]
-    for fname in os.listdir(FILES_DIR):
-        if fname.startswith(file_id):
-            direct_link = f"https://{get_download_domain()}/files/{fname}"
-            update.message.reply_text(
-                f"📂 <b>File Found!</b>\n\n"
-                f"📝 <b>Name:</b> <code>{html.escape(fname)}</code>\n"
-                f"🔗 <b>Direct Download:</b>\n<a href='{direct_link}'>{direct_link}</a>",
-                parse_mode=ParseMode.HTML,
-                disable_web_page_preview=True
-            )
-            return
-    update.message.reply_text("❌ File not found. Please check the ID.", parse_mode=ParseMode.HTML)
+    filename = find_file_by_id(file_id)
+    if filename:
+        direct_link = f"https://{get_download_domain()}/files/{filename}"
+        update.message.reply_text(
+            f"📂 <b>File Found!</b>\n\n"
+            f"🆔 <b>File ID:</b> <code>{file_id}</code>\n"
+            f"📝 <b>Name:</b> <code>{html.escape(filename)}</code>\n\n"
+            f"🔗 <b>Direct Download:</b>\n<a href='{direct_link}'>{direct_link}</a>",
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True
+        )
+    else:
+        update.message.reply_text("❌ File not found. Please check the ID.", parse_mode=ParseMode.HTML)
 
 def myfiles(update: Update, context: CallbackContext):
     """List last 10 files of a user"""
