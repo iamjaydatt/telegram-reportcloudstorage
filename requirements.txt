@@ -1,4 +1,5 @@
+colorlog==6.8.2
 python-telegram-bot==13.15
 Flask==3.0.3
 urllib3<2
-six
+six==1.16.0
