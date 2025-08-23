@@ -4,6 +4,7 @@ import time
 import html
 from telegram import Update, ParseMode, Message
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
+from telegram.error import NetworkError, TimedOut
 
 # --- Config ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -127,7 +128,7 @@ def send_announcement_to_user(bot, chat_id: int, message: Message) -> None:
             bot.send_message(chat_id=chat_id, text=message.caption, parse_mode=ParseMode.MARKDOWN)
 
     except Exception as e:
-        logger.error(f"Error sending announcement to {chat_id}: {e}")
+        raise e  # propagate error to handle blocked/deactivated cleanup
 
 
 # --- Commands ---
@@ -212,16 +213,26 @@ def announce(update: Update, context: CallbackContext) -> None:
         return
 
     success, failed = 0, 0
-    for uid in users:
+    active_users = set(users)
+
+    for uid in list(users):
         try:
             send_announcement_to_user(context.bot, int(uid), announcement_msg)
             success += 1
             time.sleep(0.1)
-        except Exception:
+        except Exception as e:
             failed += 1
+            if "bot was blocked" in str(e).lower() or "deactivated" in str(e).lower():
+                active_users.remove(uid)  # remove bad users
+
+    # rewrite users.txt with active users only
+    with open(USERS_FILE, "w") as f:
+        for u in active_users:
+            f.write(f"{u}\n")
 
     update.message.reply_text(
-        f"✅ Announcement sent to {success} users.\n❌ Failed for {failed} users."
+        f"✅ Announcement sent to {success} users.\n❌ Failed for {failed} users.\n"
+        f"🧹 Cleaned inactive users: {len(users) - len(active_users)}"
     )
 
 
@@ -285,21 +296,28 @@ def unknown_command(update: Update, context: CallbackContext) -> None:
 
 # --- Main ---
 def main() -> None:
-    """Start the bot."""
-    updater = Updater(BOT_TOKEN)
-    dp = updater.dispatcher
+    """Start the bot with retry loop."""
+    while True:
+        try:
+            updater = Updater(BOT_TOKEN)
+            dp = updater.dispatcher
 
-    # Register handlers
-    dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(CommandHandler("help", help_command))
-    dp.add_handler(CommandHandler("stats", stats))
-    dp.add_handler(CommandHandler("announce", announce))
-    dp.add_handler(MessageHandler(Filters.all & ~Filters.command, handle_file))
-    dp.add_handler(MessageHandler(Filters.command, unknown_command))
+            dp.add_handler(CommandHandler("start", start))
+            dp.add_handler(CommandHandler("help", help_command))
+            dp.add_handler(CommandHandler("stats", stats))
+            dp.add_handler(CommandHandler("announce", announce))
+            dp.add_handler(MessageHandler(Filters.all & ~Filters.command, handle_file))
+            dp.add_handler(MessageHandler(Filters.command, unknown_command))
 
-    logger.info("🤖 Bot started successfully!")
-    updater.start_polling()
-    updater.idle()
+            logger.info("🤖 Bot started successfully!")
+            updater.start_polling(drop_pending_updates=True, timeout=30)
+            updater.idle()
+        except (NetworkError, TimedOut) as e:
+            logger.warning(f"⚠️ Network issue: {e}, retrying in 5s...")
+            time.sleep(5)
+        except Exception as e:
+            logger.error(f"❌ Fatal error: {e}, restarting in 10s...")
+            time.sleep(10)
 
 
 if __name__ == "__main__":
